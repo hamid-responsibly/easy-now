@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { queueDatabasePath } from '../src/paths.js'
-import { findProjectRoot } from '../src/project.js'
+import { defaultQueueName } from '../src/queue-name.js'
 import { openQueue } from '../src/queue.js'
 import { pollInterval, runQueued } from '../src/run-queued.js'
 import { tempDir } from './helpers/temp-dir.js'
@@ -129,7 +129,7 @@ test('defaults nested directories to the project root queue', async () => {
     cwd: nested,
     dataDir: tempDir(),
   })
-  assert.equal(result.queueName, findProjectRoot(root))
+  assert.equal(result.queueName, defaultQueueName(root))
 })
 
 test('invalid poll intervals fall back to the default', () => {

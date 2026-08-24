@@ -5,7 +5,7 @@ import {
   killProcessTree,
   type ProcessSignal,
 } from './process-liveness.js'
-import { findProjectRoot } from './project.js'
+import { defaultQueueName } from './queue-name.js'
 import {
   isSqliteBusy,
   openQueue,
@@ -39,7 +39,7 @@ export async function runQueued({
   dataDir,
   timeoutSeconds,
 }: RunQueuedOptions): Promise<RunQueuedResult> {
-  const queueName = requestedQueueName ?? findProjectRoot(cwd)
+  const queueName = requestedQueueName ?? defaultQueueName(cwd)
   const queue = openQueue(resolveDataDir(dataDir))
   const displayCommand = [command, ...argv].join(' ')
   const taskId = queue.enqueue({

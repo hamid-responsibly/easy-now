@@ -3,10 +3,8 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseCli, type ParsedCli } from './parse-cli.js'
 import { resolveDataDir } from './paths.js'
-import {
-  findProjectRoot,
-  resolveNpmScript,
-} from './project.js'
+import { resolveNpmScript } from './project.js'
+import { defaultQueueName } from './queue-name.js'
 import {
   QueueClearedError,
   withQueue,
@@ -39,7 +37,7 @@ async function dispatch(parsed: ParsedCli): Promise<number> {
       const cwd = resolve(parsed.cwd ?? process.cwd())
       const queueName = parsed.all
         ? undefined
-        : parsed.queue ?? findProjectRoot(cwd)
+        : parsed.queue ?? defaultQueueName(cwd)
       const removed = withQueue(resolveDataDir(parsed.dataDir), (queue) =>
         queue.clear(queueName),
       )
@@ -161,7 +159,7 @@ Usage:
   easy-now --help
 
 Options:
-  -q, --queue <name>     Queue name (default: git root, else package root)
+  -q, --queue <name>     Queue name (default: git remote, else this checkout)
   -t, --timeout <sec>    Kill the command after this many seconds
   -C, --cwd <dir>        Working directory
       --data-dir <dir>   SQLite directory (default: ~/.easy-now)

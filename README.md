@@ -54,7 +54,11 @@ For `run`, `list`, `clear`, and `help`, flags can also go directly after the ver
 
 ## Queues
 
-By default the queue name is the **git root** (or the nearest `package.json` directory). Two checkouts can build at the same time. Two processes in the same repo wait.
+By default the queue name is the **git remote** (`origin`, else the first remote), normalized so `git@` and `https://` clones of the same repo share a line. Worktrees and extra clones of that remote wait on each other.
+
+If the checkout has no remotes, the shared git directory is used, so worktrees of a local-only repo still share. If there is no git repo, the nearest `package.json` directory is used.
+
+A clone of a fork does not share a queue with a clone of upstream: their `origin` URLs differ. Use `-q` to join or split queues by hand.
 
 Use `--queue` when you want a different split:
 
@@ -94,7 +98,7 @@ const { exitCode } = await runQueued({
   command: 'pnpm',
   argv: ['test'],
   cwd: process.cwd(),
-  queueName: 'tests', // Optional. Defaults to the git or package root.
+  queueName: 'tests', // Optional. Defaults to the git remote, else this checkout.
 })
 ```
 
