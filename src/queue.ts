@@ -107,24 +107,24 @@ export function openQueue(dataDir: string): TaskQueue {
   const admitWaiting = db.prepare(
     `UPDATE queue
      SET status = 'running', updated_at = datetime('now'),
-         pid = ?3, pid_started_at = ?4
-     WHERE id = ?1 AND status = 'waiting'
+         pid = :pid, pid_started_at = :ownerStartedAt
+     WHERE id = :taskId AND status = 'waiting'
        AND NOT EXISTS (
          SELECT 1 FROM queue
-         WHERE queue_name = ?2 AND status = 'running'
+         WHERE queue_name = :queueName AND status = 'running'
        )
        AND NOT EXISTS (
          SELECT 1 FROM queue
-         WHERE queue_name = ?2 AND status = 'waiting' AND id < ?1
+         WHERE queue_name = :queueName AND status = 'waiting' AND id < :taskId
        )`,
   )
   const selectPosition = db.prepare(
     `SELECT COUNT(*) AS count
      FROM queue
-     WHERE queue_name = ?1
+     WHERE queue_name = ?
        AND (
          status = 'running'
-         OR (status = 'waiting' AND id <= ?2)
+         OR (status = 'waiting' AND id <= ?)
        )`,
   ) as unknown as ReadStatement<QueuePositionRow>
   const updateChildPid = db.prepare(
@@ -197,12 +197,12 @@ export function openQueue(dataDir: string): TaskQueue {
     if (!ownerStartedAt) {
       throw new Error(`Cannot read process start time for pid ${process.pid}`)
     }
-    const updated = admitWaiting.run(
-      taskId,
-      queueName,
-      process.pid,
-      ownerStartedAt,
-    )
+    const updated = admitWaiting.run({
+      ':taskId': taskId,
+      ':queueName': queueName,
+      ':pid': process.pid,
+      ':ownerStartedAt': ownerStartedAt,
+    })
     if (updated.changes > 0) {
       return { started: true, position: 0 }
     }
