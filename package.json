@@ -18,7 +18,7 @@
     "linux"
   ],
   "bin": {
-    "easy-now": "./dist/cli.js"
+    "easy-now": "dist/cli.js"
   },
   "exports": {
     ".": {
@@ -34,11 +34,17 @@
   "engines": {
     "node": ">=22.16.0"
   },
+  "packageManager": "pnpm@10.34.5",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build"
+    "prepack": "pnpm build",
+    "prepublishOnly": "pnpm typecheck && pnpm test"
   },
   "keywords": [
     "queue",
