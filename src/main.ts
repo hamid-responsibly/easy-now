@@ -6,10 +6,11 @@ import { resolveDataDir } from './paths.js'
 import { resolveNpmScript } from './project.js'
 import { defaultQueueName } from './queue-name.js'
 import {
-  QueueClearedError,
-  withQueue,
-  type QueueTask,
-} from './queue.js'
+  peekQueues,
+  type PeekedJob,
+  type QueuePeek,
+} from './queue-peek.js'
+import { QueueClearedError, withQueue } from './queue.js'
 import { runQueued } from './run-queued.js'
 
 export async function main(argv: string[]): Promise<number> {
@@ -31,7 +32,7 @@ async function dispatch(parsed: ParsedCli): Promise<number> {
       console.log(readVersion())
       return 0
     case 'list':
-      printList(parsed.dataDir, parsed.queue)
+      printList(parsed)
       return 0
     case 'clear': {
       const cwd = resolve(parsed.cwd ?? process.cwd())
@@ -97,19 +98,51 @@ async function runExec(parsed: Extract<ParsedCli, { kind: 'exec' }>): Promise<nu
   return result.exitCode
 }
 
-function printList(dataDir: string | undefined, queueName: string | undefined): void {
-  const tasks = withQueue(resolveDataDir(dataDir), (queue) => queue.list(queueName))
-  if (tasks.length === 0) {
-    console.log('Queue is empty.')
+function printList(parsed: Extract<ParsedCli, { kind: 'list' }>): void {
+  const cwd = resolve(parsed.cwd ?? process.cwd())
+  const scopedName = parsed.all
+    ? undefined
+    : parsed.queue ?? defaultQueueName(cwd)
+  const tasks = withQueue(resolveDataDir(parsed.dataDir), (queue) => {
+    const names = scopedName
+      ? [scopedName]
+      : [...new Set(queue.list().map((task) => task.queueName))]
+    for (const name of names) {
+      queue.cleanup(name)
+    }
+    return queue.list(scopedName)
+  })
+  const peeks = peekQueues(tasks, scopedName)
+  if (parsed.json) {
+    console.log(JSON.stringify({ queues: peeks }, null, 2))
     return
   }
+  console.log(formatPeekText(peeks))
+}
 
-  const rows = tasks.map((task) => formatTask(task))
-  const headers = ['ID', 'STATUS', 'QUEUE', 'PID', 'COMMAND'] as const
+function formatPeekText(peeks: QueuePeek[]): string {
+  if (peeks.length === 0) {
+    return 'No queues.'
+  }
+  if (peeks.length === 1 && peeks[0]) {
+    return formatQueuePeek(peeks[0])
+  }
+  const running = peeks.reduce((sum, peek) => sum + peek.running, 0)
+  const waiting = peeks.reduce((sum, peek) => sum + peek.waiting, 0)
+  const headline = `${peeks.length} queues: ${running} running, ${waiting} waiting`
+  return [headline, '', peeks.map(formatQueuePeek).join('\n\n')].join('\n')
+}
+
+function formatQueuePeek(peek: QueuePeek): string {
+  const summary = `${peek.queue}: ${peek.running} running, ${peek.waiting} waiting`
+  if (peek.jobs.length === 0) {
+    return summary
+  }
+  const rows = peek.jobs.map(formatJob)
+  const headers = ['PLACE', 'STATUS', 'PID', 'COMMAND'] as const
   const widths = headers.map((header) =>
     Math.max(header.length, ...rows.map((row) => row[header].length)),
   )
-
   const formatRow = (
     row: Record<(typeof headers)[number], string>,
   ): string =>
@@ -119,16 +152,17 @@ function printList(dataDir: string | undefined, queueName: string | undefined): 
   const headerRow = Object.fromEntries(
     headers.map((header) => [header, header]),
   ) as Record<(typeof headers)[number], string>
-  console.log([formatRow(headerRow), ...rows.map(formatRow)].join('\n'))
+  return [summary, formatRow(headerRow), ...rows.map(formatRow)].join('\n')
 }
 
-function formatTask(task: QueueTask): Record<'ID' | 'STATUS' | 'QUEUE' | 'PID' | 'COMMAND', string> {
+function formatJob(
+  job: PeekedJob,
+): Record<'PLACE' | 'STATUS' | 'PID' | 'COMMAND', string> {
   return {
-    ID: String(task.id),
-    STATUS: task.status,
-    QUEUE: task.queueName,
-    PID: task.pid == null ? '-' : String(task.pid),
-    COMMAND: task.command ?? '-',
+    PLACE: String(job.place),
+    STATUS: job.status,
+    PID: job.pid == null ? '-' : String(job.pid),
+    COMMAND: job.command ?? '-',
   }
 }
 
@@ -154,7 +188,8 @@ Usage:
   easy-now [options] -- <command> [...args]
   easy-now [options] <command> [...args]
   easy-now [options] run <script> [-- ...args]
-  easy-now [options] list
+  easy-now [options] list [--json] [--all]
+  easy-now [options] peek [--json] [--all]
   easy-now [options] clear [--all]
   easy-now --help
 
@@ -163,7 +198,8 @@ Options:
   -t, --timeout <sec>    Kill the command after this many seconds
   -C, --cwd <dir>        Working directory
       --data-dir <dir>   SQLite directory (default: ~/.easy-now)
-      --all              Clear every queue
+      --all              Every queue (list or clear)
+      --json             Machine-readable list output
   -h, --help             Show this help
   -v, --version          Show version
 

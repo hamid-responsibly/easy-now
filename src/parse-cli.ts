@@ -4,6 +4,7 @@ export type SharedCliFlags = {
   cwd?: string
   dataDir?: string
   all?: boolean
+  json?: boolean
 }
 
 export type ParsedCli =
@@ -14,7 +15,7 @@ export type ParsedCli =
   | ({ kind: 'run'; script: string; scriptArgs: string[] } & SharedCliFlags)
   | ({ kind: 'exec'; argv: string[] } & SharedCliFlags)
 
-type Verb = 'run' | 'list' | 'clear' | 'status' | 'help'
+type Verb = 'run' | 'list' | 'clear' | 'status' | 'peek' | 'help'
 type InternalFlags = SharedCliFlags & { help?: true; version?: true }
 
 const FLAGS = {
@@ -26,13 +27,14 @@ const FLAGS = {
   '--cwd': 'cwd',
   '--data-dir': 'dataDir',
   '--all': 'all',
+  '--json': 'json',
   '-h': 'help',
   '--help': 'help',
   '-v': 'version',
   '--version': 'version',
 } as const
 
-const VERBS = new Set<string>(['run', 'list', 'clear', 'status', 'help'])
+const VERBS = new Set<string>(['run', 'list', 'clear', 'status', 'peek', 'help'])
 
 export function parseCli(argv: string[]): ParsedCli {
   const leading = consumeLeadingFlags(argv)
@@ -101,6 +103,9 @@ function consumeLeadingFlags(argv: string[]): {
       case 'all':
         flags = { ...flags, all: true }
         break
+      case 'json':
+        flags = { ...flags, json: true }
+        break
       case 'queue':
         flags = { ...flags, queue: nextValue }
         break
@@ -136,14 +141,15 @@ function parseVerb(
       return { kind: 'help', ...flags }
     case 'list':
     case 'status':
+    case 'peek':
       requireNoArguments(verb, rest)
-      requireClearForAll(flags)
       return { kind: 'list', ...flags }
     case 'clear':
       requireNoArguments(verb, rest)
+      requireListForJson(flags)
       return { kind: 'clear', ...flags }
     case 'run': {
-      requireClearForAll(flags)
+      requireInspectFlags(flags)
       const script = rest[0]
       if (!script) {
         throw new Error('Usage: easy-now run <script> [...args]')
@@ -164,7 +170,7 @@ function parseVerb(
 }
 
 function parseExec(argv: string[], flags: InternalFlags): ParsedCli {
-  requireClearForAll(flags)
+  requireInspectFlags(flags)
   return (
     parseMeta(flags) ??
     (argv.length === 0
@@ -200,9 +206,16 @@ function requireNoArguments(verb: Verb, rest: string[]): void {
   }
 }
 
-function requireClearForAll({ all }: SharedCliFlags): void {
-  if (all) {
-    throw new Error('--all can only be used with clear')
+function requireListForJson({ json }: SharedCliFlags): void {
+  if (json) {
+    throw new Error('--json can only be used with list')
+  }
+}
+
+function requireInspectFlags(flags: SharedCliFlags): void {
+  requireListForJson(flags)
+  if (flags.all) {
+    throw new Error('--all can only be used with list or clear')
   }
 }
 

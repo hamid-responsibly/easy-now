@@ -16,6 +16,55 @@ export function isProcessAlive(pid: number | null | undefined): boolean {
   }
 }
 
+export function getParentPid(pid: number): number | null {
+  if (pid <= 0) {
+    return null
+  }
+
+  try {
+    if (process.platform === 'linux') {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      const fieldsAfterName = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+      const parent = Number(fieldsAfterName[1])
+      return Number.isInteger(parent) && parent >= 0 ? parent : null
+    }
+    if (process.platform === 'darwin') {
+      const raw = execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)], {
+        encoding: 'utf8',
+      }).trim()
+      const parent = Number(raw)
+      return Number.isInteger(parent) && parent >= 0 ? parent : null
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+export function isCurrentProcessOrAncestor(pid: number): boolean {
+  if (pid === process.pid) {
+    return true
+  }
+  if (pid <= 1) {
+    return false
+  }
+
+  const seen = new Set<number>()
+  let current = process.ppid
+  while (current > 0 && seen.has(current) === false) {
+    if (current === pid) {
+      return true
+    }
+    seen.add(current)
+    const parent = getParentPid(current)
+    if (parent == null || parent === current) {
+      return false
+    }
+    current = parent
+  }
+  return false
+}
+
 export function getProcessStartTime(pid: number): string | null {
   if (!isProcessAlive(pid)) {
     return null

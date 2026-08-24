@@ -3,11 +3,19 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { test } from 'node:test'
 import {
+  getParentPid,
   getProcessStartTime,
+  isCurrentProcessOrAncestor,
   isProcessAlive,
   killProcessTree,
   processIdentityMatches,
 } from '../src/process-liveness.js'
+
+test('reads the parent pid of this process', () => {
+  assert.equal(getParentPid(process.pid), process.ppid)
+  assert.equal(isCurrentProcessOrAncestor(process.pid), true)
+  assert.equal(isCurrentProcessOrAncestor(process.ppid), true)
+})
 
 test('reads and matches the current process start time', () => {
   const startedAt = getProcessStartTime(process.pid)
