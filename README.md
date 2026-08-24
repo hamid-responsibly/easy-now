@@ -38,6 +38,8 @@ easy-now run test -- --watch
 
 Pick one of those paths for a given script. If a script is already wrapped and you also run `easy-now run <script>`, the inner `easy-now` sees that an ancestor already holds the same queue and data dir, and runs the command without taking a second slot. Without that, the outer process holds the only slot and the inner one waits forever.
 
+Every slot an ancestor holds is passed down, so a chain such as build → test → build still finishes: the innermost call recognizes the outermost slot even though another queue sits between them. A slot only counts when the queue database agrees that the task is still running for that ancestor, so a leftover or hand-written environment variable cannot skip the line. Data directories are compared after resolving symlinks, so a link and its target are one queue.
+
 Any command works:
 
 ```bash

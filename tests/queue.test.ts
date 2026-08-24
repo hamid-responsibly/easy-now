@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
-import { chmodSync } from 'node:fs'
+import { chmodSync, symlinkSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
+import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { queueDatabasePath } from '../src/paths.js'
@@ -23,7 +24,7 @@ test('first waiter acquires an empty queue', () => {
       cwd: '/tmp',
     })
     const result = queue.tryStart(id, 'app')
-    assert.deepEqual(result, { started: true, position: 0 })
+    assert.deepEqual(result, { started: true })
     assert.equal(queue.list('app')[0]?.status, 'running')
   } finally {
     queue.close()
@@ -48,6 +49,7 @@ test('second waiter stays waiting while the first is running', () => {
     assert.deepEqual(queue.tryStart(second, 'app'), {
       started: false,
       position: 2,
+      length: 2,
     })
     queue.release(first)
     assert.equal(queue.tryStart(second, 'app').started, true)
@@ -108,6 +110,78 @@ test('cleanup drops waiters whose process is dead', () => {
     assert.equal(remaining[0]?.command, 'alive')
   } finally {
     reopened.close()
+  }
+})
+
+test('snapshot drops dead rows in every queue and returns what is left', () => {
+  const dir = tempDir()
+  const queue = openQueue(dir)
+  try {
+    const alive = queue.enqueue({ queueName: 'app', command: 'alive', cwd: '/tmp' })
+    assert.equal(queue.tryStart(alive, 'app').started, true)
+    const db = new DatabaseSync(queueDatabasePath(dir))
+    try {
+      db.prepare(
+        `INSERT INTO queue (queue_name, status, pid, pid_started_at, command, cwd)
+         VALUES ('other', 'running', 2147483647, 'dead', 'dead', '/tmp')`,
+      ).run()
+    } finally {
+      db.close()
+    }
+
+    assert.deepEqual(
+      queue.snapshot().map(({ queueName, command }) => ({ queueName, command })),
+      [{ queueName: 'app', command: 'alive' }],
+    )
+  } finally {
+    queue.close()
+  }
+})
+
+test('a scoped snapshot leaves other queues untouched', () => {
+  const dir = tempDir()
+  const queue = openQueue(dir)
+  try {
+    queue.enqueue({ queueName: 'app', command: 'a', cwd: '/tmp' })
+    const db = new DatabaseSync(queueDatabasePath(dir))
+    try {
+      db.prepare(
+        `INSERT INTO queue (queue_name, status, pid, pid_started_at, command, cwd)
+         VALUES ('other', 'running', 2147483647, 'dead', 'dead', '/tmp')`,
+      ).run()
+    } finally {
+      db.close()
+    }
+
+    assert.deepEqual(
+      queue.snapshot('app').map(({ command }) => command),
+      ['a'],
+    )
+    assert.equal(queue.list('other').length, 1)
+  } finally {
+    queue.close()
+  }
+})
+
+test('a symlinked data dir opens the same queue storage as its target', () => {
+  const target = tempDir()
+  const link = join(tempDir(), 'alias')
+  symlinkSync(target, link)
+  const viaTarget = openQueue(target)
+  try {
+    viaTarget.enqueue({ queueName: 'app', command: 'build', cwd: '/tmp' })
+  } finally {
+    viaTarget.close()
+  }
+
+  const viaLink = openQueue(link)
+  try {
+    assert.deepEqual(
+      viaLink.list('app').map(({ command }) => command),
+      ['build'],
+    )
+  } finally {
+    viaLink.close()
   }
 })
 
