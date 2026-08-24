@@ -7,8 +7,9 @@ import {
   getProcessStartTime,
   isCurrentProcessOrAncestor,
   isProcessAlive,
-  killProcessTree,
+  isProcessGroupAlive,
   processIdentityMatches,
+  terminateProcessGroup,
 } from '../src/process-liveness.js'
 
 test('reads the parent pid of this process', () => {
@@ -24,7 +25,7 @@ test('reads and matches the current process start time', () => {
   assert.equal(processIdentityMatches(process.pid, 'not-the-start-time'), false)
 })
 
-test('killProcessTree escalates when a child ignores SIGTERM', async () => {
+test('terminateProcessGroup escalates when a child ignores SIGTERM', async () => {
   const child = spawn(
     process.execPath,
     [
@@ -39,12 +40,56 @@ test('killProcessTree escalates when a child ignores SIGTERM', async () => {
   assert.ok(childPid)
 
   try {
-    killProcessTree(childPid, 'SIGTERM', 100)
-    await once(child, 'close')
-    assert.equal(isProcessAlive(childPid), false)
+    await terminateProcessGroup(childPid, 'SIGTERM', 100)
+    assert.equal(isProcessGroupAlive(childPid), false)
   } finally {
     if (isProcessAlive(childPid)) {
       process.kill(-childPid, 'SIGKILL')
     }
   }
+})
+
+test('terminateProcessGroup waits for a grandchild that ignores SIGTERM', async () => {
+  const child = spawn(
+    process.execPath,
+    [
+      '-e',
+      [
+        "process.on('SIGTERM', () => {})",
+        "const grandchild = require('child_process').spawn(process.execPath, ['-e', \"process.on('SIGTERM',()=>{});process.send?.('ready');setInterval(()=>{},1000)\"], { stdio: ['ignore','ignore','ignore','ipc'] })",
+        "grandchild.on('message', () => process.send?.(grandchild.pid))",
+        'setInterval(() => {}, 1000)',
+      ].join(';'),
+    ],
+    { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] },
+  )
+  const [grandchildPid] = (await once(child, 'message')) as [number]
+  const childPid = child.pid
+  assert.ok(childPid)
+  assert.equal(isProcessAlive(grandchildPid), true)
+
+  try {
+    await terminateProcessGroup(childPid, 'SIGTERM', 100)
+    assert.equal(isProcessAlive(grandchildPid), false)
+    assert.equal(isProcessGroupAlive(childPid), false)
+  } finally {
+    if (isProcessAlive(grandchildPid)) {
+      process.kill(grandchildPid, 'SIGKILL')
+    }
+    if (isProcessAlive(childPid)) {
+      process.kill(-childPid, 'SIGKILL')
+    }
+  }
+})
+
+test('terminating a process group that is already gone is a no-op', async () => {
+  const child = spawn(process.execPath, ['-e', ''], {
+    detached: true,
+    stdio: 'ignore',
+  })
+  await once(child, 'close')
+  const childPid = child.pid
+  assert.ok(childPid)
+  await terminateProcessGroup(childPid, 'SIGTERM', 100)
+  assert.equal(isProcessGroupAlive(childPid), false)
 })

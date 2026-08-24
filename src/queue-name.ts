@@ -9,7 +9,7 @@ const GIT_TIMEOUT_MS = 2000
 export function defaultQueueName(startDir: string): string {
   const remoteUrl = gitRemoteUrl(startDir)
   if (remoteUrl) {
-    return normalizeGitRemoteUrl(remoteUrl)
+    return normalizeRemoteUrl(remoteUrl, gitToplevel(startDir) ?? startDir)
   }
 
   const commonDir = gitCommonDir(startDir)
@@ -20,7 +20,16 @@ export function defaultQueueName(startDir: string): string {
   return findProjectRoot(startDir)
 }
 
+/** Relative paths resolve against the caller's directory. */
 export function normalizeGitRemoteUrl(raw: string): string {
+  return normalizeRemoteUrl(raw, process.cwd())
+}
+
+/**
+ * `baseDir` is the checkout that owns the remote, so a remote such as
+ * `../upstream.git` names the same queue from any working directory.
+ */
+function normalizeRemoteUrl(raw: string, baseDir: string): string {
   const trimmed = raw.trim()
   if (trimmed.length === 0) {
     throw new Error('Git remote URL must not be empty')
@@ -28,7 +37,7 @@ export function normalizeGitRemoteUrl(raw: string): string {
 
   const withoutGitPlus = trimmed.replace(/^git\+/, '')
   if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(withoutGitPlus)) {
-    return normalizeUrlRemote(withoutGitPlus)
+    return normalizeUrlRemote(withoutGitPlus, baseDir)
   }
 
   const scp = /^([^@/?#]+)@([^:/?#]+):(.+)$/.exec(withoutGitPlus)
@@ -40,13 +49,13 @@ export function normalizeGitRemoteUrl(raw: string): string {
     return normalizeNetworkIdentity(host, path)
   }
 
-  return resolveExisting(withoutGitPlus)
+  return resolveExisting(withoutGitPlus, baseDir)
 }
 
-function normalizeUrlRemote(value: string): string {
+function normalizeUrlRemote(value: string, baseDir: string): string {
   const url = new URL(value)
   if (url.protocol === 'file:') {
-    return resolveExisting(fileURLToPath(url))
+    return resolveExisting(fileURLToPath(url), baseDir)
   }
   return normalizeNetworkIdentity(url.host, url.pathname)
 }
@@ -84,14 +93,19 @@ function gitCommonDir(startDir: string): string | null {
   if (!commonDir) {
     return null
   }
-  return resolveExisting(resolve(startDir, commonDir))
+  return resolveExisting(commonDir, startDir)
 }
 
-function resolveExisting(path: string): string {
+function gitToplevel(startDir: string): string | null {
+  return git(startDir, ['rev-parse', '--show-toplevel'])
+}
+
+function resolveExisting(path: string, baseDir: string): string {
+  const absolute = resolve(baseDir, path)
   try {
-    return realpathSync(path)
+    return realpathSync(absolute)
   } catch {
-    return resolve(path)
+    return absolute
   }
 }
 

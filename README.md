@@ -36,6 +36,8 @@ easy-now run build
 easy-now run test -- --watch
 ```
 
+`run` calls the package manager the project already uses: the nearest `packageManager` declaration wins, then the nearest lockfile, searching from the package up to the repository or workspace root. A package inside a pnpm workspace runs under pnpm even when only the workspace root has the lockfile.
+
 Pick one of those paths for a given script. If a script is already wrapped and you also run `easy-now run <script>`, the inner `easy-now` sees that an ancestor already holds the same queue and data dir, and runs the command without taking a second slot. Without that, the outer process holds the only slot and the inner one waits forever.
 
 Every slot an ancestor holds is passed down, so a chain such as build → test → build still finishes: the innermost call recognizes the outermost slot even though another queue sits between them. A slot only counts when the queue database agrees that the task is still running for that ancestor, so a leftover or hand-written environment variable cannot skip the line. Data directories are compared after resolving symlinks, so a link and its target are one queue.
@@ -56,9 +58,13 @@ easy-now -q build -- next build
 
 For `run`, `list`, `clear`, and `help`, flags can also go directly after the verb, before its first argument. Once a script or command starts, later flags belong to it. Everything after `--` is always literal command input. Use `--` when a command is named `run`, `list`, `peek`, `clear`, `status`, or `help` so easy-now does not read it as a verb.
 
+Each command only takes the flags it can act on, and says so instead of ignoring the rest: `--json` and `--all` belong to `list`, `--all` also to `clear`, and `--timeout` only to a command or `run`. `--help` and `--version` win over everything, wherever they appear.
+
 ## Queues
 
 By default the queue name is the **git remote** (`origin`, else the first remote), normalized so `git@` and `https://` clones of the same repo share a line. Worktrees and extra clones of that remote wait on each other.
+
+A remote that is a filesystem path resolves against the checkout that owns it, the same way git does, so a relative remote such as `../upstream.git` names one queue from any working directory.
 
 If the checkout has no remotes, the shared git directory is used, so worktrees of a local-only repo still share. If there is no git repo, the nearest `package.json` directory is used.
 
@@ -93,7 +99,9 @@ A waiter writes `easy-now: place N of M in <queue>` to stderr whenever its place
 
 State lives in `~/.easy-now/queue.db` (override with `--data-dir` or `EASY_NOW_DATA_DIR`). easy-now creates the directory with mode `0700` and rejects directories owned by another user or writable by a group or other users. The file is not compatible with [Block's agent-task-queue](https://github.com/block/agent-task-queue). Mixing the two on one database would be a good way to lose tasks.
 
-If a process dies while it holds the queue, the next waiter notices the dead pid, kills any leftover child, and continues.
+If a process dies while it holds the queue, the next waiter notices the dead pid, stops any leftover command, and continues.
+
+A slot is only released once the command and everything it started are gone. `clear` and `--timeout` send `SIGTERM` to the process group, escalate to `SIGKILL` after two seconds, and wait for the group to disappear, so the next command never starts on top of the old one.
 
 Queue waiting has no timeout. `--timeout` starts after the command gets its turn and only limits the command.
 
@@ -112,7 +120,7 @@ const { exitCode } = await runQueued({
 })
 ```
 
-The package exports `runQueued` and its option, result, and queue-task types. The SQLite queue and CLI parser are internal.
+The result is `{ exitCode, queueName }`. The package exports `runQueued` and its option and result types. Task ids, the SQLite queue, and the CLI parser are internal.
 
 ## Why a CLI, not MCP
 

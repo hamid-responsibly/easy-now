@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { setTimeout as delay } from 'node:timers/promises'
 import { resolveDataDir } from './paths.js'
 import {
-  killProcessTree,
+  terminateProcessGroup,
   type ProcessSignal,
 } from './process-liveness.js'
 import { heldTaskId, leaseChildEnv } from './queue-holding.js'
@@ -28,7 +28,6 @@ export type RunQueuedOptions = {
 
 export type RunQueuedResult = {
   exitCode: number
-  taskId: number
   queueName: string
 }
 
@@ -53,7 +52,7 @@ export async function runQueued({
       cwd,
       timeoutSeconds,
     })
-    return { exitCode, taskId: alreadyHeld, queueName }
+    return { exitCode, queueName }
   }
 
   const queue = openQueue(resolvedDir)
@@ -81,7 +80,7 @@ export async function runQueued({
         }),
         onSpawn: (childPid) => queue.setChildPid(taskId, childPid),
       })
-      return { exitCode, taskId, queueName }
+      return { exitCode, queueName }
     } finally {
       clearInterval(heartbeat)
     }
@@ -100,8 +99,8 @@ async function waitForTurn(
   let lastLine: string | undefined
   for (;;) {
     try {
-      queue.cleanup(queueName)
-      const attempt = queue.tryStart(taskId, queueName)
+      await queue.cleanup(queueName)
+      const attempt = queue.tryStart(taskId)
       if (attempt.started) {
         return
       }
@@ -169,21 +168,24 @@ async function runChild({
   try {
     onSpawn?.(childPid)
   } catch (error) {
-    killProcessTree(childPid)
-    await new Promise<void>((resolve) => {
+    const closed = new Promise<void>((resolve) => {
       child.once('error', () => resolve())
       child.once('close', () => resolve())
     })
+    await terminateProcessGroup(childPid)
+    await closed
     throw error
   }
 
   let timedOut = false
   let interruptedBy: ProcessSignal | undefined
+  /** Held so the queue slot outlives every descendant we stopped. */
+  const terminations: Array<Promise<void>> = []
   const timeoutHandle =
     timeoutSeconds != null && timeoutSeconds > 0
       ? setTimeout(() => {
           timedOut = true
-          killProcessTree(childPid)
+          terminations.push(terminateProcessGroup(childPid))
         }, timeoutSeconds * 1000)
       : undefined
   timeoutHandle?.unref()
@@ -210,7 +212,7 @@ async function runChild({
   const onAbort = (signal: ProcessSignal): void => {
     interruptedBy = signal
     process.exitCode = signal === 'SIGINT' ? 130 : 143
-    killProcessTree(childPid, signal)
+    terminations.push(terminateProcessGroup(childPid, signal))
   }
   const onSigint = (): void => onAbort('SIGINT')
   const onSigterm = (): void => onAbort('SIGTERM')
@@ -223,5 +225,6 @@ async function runChild({
     process.removeListener('SIGINT', onSigint)
     process.removeListener('SIGTERM', onSigterm)
     clearTimeout(timeoutHandle)
+    await Promise.all(terminations)
   }
 }

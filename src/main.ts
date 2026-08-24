@@ -10,7 +10,7 @@ import {
   type PeekedJob,
   type QueuePeek,
 } from './queue-peek.js'
-import { QueueClearedError, withQueue } from './queue.js'
+import { clearQueue, QueueClearedError, withQueue } from './queue.js'
 import { runQueued } from './run-queued.js'
 
 export async function main(argv: string[]): Promise<number> {
@@ -39,9 +39,7 @@ async function dispatch(parsed: ParsedCli): Promise<number> {
       const queueName = parsed.all
         ? undefined
         : parsed.queue ?? defaultQueueName(cwd)
-      const removed = withQueue(resolveDataDir(parsed.dataDir), (queue) =>
-        queue.clear(queueName),
-      )
+      const removed = await clearQueue(resolveDataDir(parsed.dataDir), queueName)
       console.log(
         parsed.all
           ? `Cleared ${removed} task(s) in all queues.`

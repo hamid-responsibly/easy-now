@@ -173,12 +173,16 @@ function parseVerb(verb: Verb, rest: string[], flags: InternalFlags): ParsedCli 
   }
 }
 
+/** Help and version win over every option check, whatever the argument order. */
 function parseExec(argv: string[], flags: InternalFlags): ParsedCli {
+  const meta = parseMeta(flags)
+  if (meta) {
+    return meta
+  }
   const options = commandOptions(flags)
-  return (
-    parseMeta(flags) ??
-    (argv.length === 0 ? { kind: 'help' } : { kind: 'exec', argv, ...options })
-  )
+  return argv.length === 0
+    ? { kind: 'help' }
+    : { kind: 'exec', argv, ...options }
 }
 
 function parseMeta(flags: InternalFlags): ParsedCli | null {
@@ -193,9 +197,12 @@ function inspectScope({
   json: _json,
   help: _help,
   version: _version,
-  timeoutSeconds: _timeoutSeconds,
+  timeoutSeconds,
   ...scope
 }: InternalFlags): InspectScope {
+  if (timeoutSeconds != null) {
+    throw new Error('--timeout can only be used with run or a command')
+  }
   if (scope.all && scope.queue) {
     throw new Error('--all and --queue cannot be used together')
   }

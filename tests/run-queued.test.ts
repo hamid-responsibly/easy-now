@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { queueDatabasePath } from '../src/paths.js'
+import { isProcessAlive } from '../src/process-liveness.js'
 import { defaultQueueName } from '../src/queue-name.js'
 import { openQueue } from '../src/queue.js'
 import { pollInterval, runQueued } from '../src/run-queued.js'
@@ -94,8 +95,71 @@ test('timeout escalates when a command ignores SIGTERM', async () => {
   })
   const elapsed = Date.now() - begin
   assert.equal(result.exitCode, 124)
-  assert.ok(elapsed < 4000, `timeout took ${elapsed}ms`)
+  // One second of command, then the two-second grace before SIGKILL.
+  assert.ok(elapsed < 5000, `timeout took ${elapsed}ms`)
 })
+
+test(
+  'a timed-out command never overlaps the next one',
+  { timeout: 30_000 },
+  async () => {
+    const dataDir = tempDir()
+    const pidPath = join(dataDir, 'grandchild.pid')
+    const overlapPath = join(dataDir, 'overlap.txt')
+    const stubbornGrandchild = [
+      "process.on('SIGTERM', () => {})",
+      `require('fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid))`,
+      'setInterval(() => {}, 1000)',
+    ].join(';')
+    const timedOut = runQueued({
+      command: process.execPath,
+      argv: [
+        '-e',
+        [
+          'process.on(\'SIGTERM\', () => process.exit(0))',
+          `require('child_process').spawn(process.execPath,['-e',${JSON.stringify(stubbornGrandchild)}],{stdio:'ignore'})`,
+          'setInterval(() => {}, 1000)',
+        ].join(';'),
+      ],
+      cwd: process.cwd(),
+      queueName: 'overlap',
+      dataDir,
+      timeoutSeconds: 1,
+    })
+    await waitForFile(pidPath)
+    const grandchildPid = Number(readFileSync(pidPath, 'utf8'))
+    assert.ok(grandchildPid > 0)
+
+    const replacement = runQueued({
+      command: process.execPath,
+      argv: [
+        '-e',
+        [
+          "const fs=require('fs')",
+          `const pid=Number(fs.readFileSync(${JSON.stringify(pidPath)},'utf8'))`,
+          'let alive=false',
+          'try{process.kill(pid,0);alive=true}catch{}',
+          `fs.writeFileSync(${JSON.stringify(overlapPath)}, alive?'overlap':'clean')`,
+        ].join(';'),
+      ],
+      cwd: process.cwd(),
+      queueName: 'overlap',
+      dataDir,
+    })
+
+    try {
+      const [first, second] = await Promise.all([timedOut, replacement])
+      assert.equal(first.exitCode, 124)
+      assert.equal(second.exitCode, 0)
+      assert.equal(readFileSync(overlapPath, 'utf8'), 'clean')
+      assert.equal(isProcessAlive(grandchildPid), false)
+    } finally {
+      if (isProcessAlive(grandchildPid)) {
+        process.kill(grandchildPid, 'SIGKILL')
+      }
+    }
+  },
+)
 
 test('releases the queue row when spawning throws', async () => {
   const dataDir = tempDir()
@@ -294,7 +358,7 @@ test('a cleared waiter exits with the queue-cleared code', async () => {
   const waiterExit = once(waiter, 'exit')
   const queue = openQueue(dataDir)
   try {
-    queue.clear('cleared')
+    await queue.clear('cleared')
   } finally {
     queue.close()
   }
@@ -340,6 +404,16 @@ test('real processes never overlap in one queue', async () => {
   )
   assert.deepEqual(exits, Array.from({ length: 8 }, () => 0))
 })
+
+async function waitForFile(path: string): Promise<void> {
+  const deadline = Date.now() + 10_000
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for ${path}`)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+}
 
 async function waitForQueueRows(
   dataDir: string,

@@ -44,7 +44,7 @@ test('cli list shows place in the current queue and ignores others', async () =>
     cwd,
   })
   queue.enqueue({ queueName: 'other', command: 'ignored', cwd })
-  assert.equal(queue.tryStart(first, cwd).started, true)
+  assert.equal(queue.tryStart(first).started, true)
   queue.close()
 
   const output = await captureLog(() =>
@@ -71,7 +71,7 @@ test('cli peek --json reports counts and place', async () => {
     command: 'vitest run',
     cwd: '/tmp',
   })
-  assert.equal(queue.tryStart(first, 'app').started, true)
+  assert.equal(queue.tryStart(first).started, true)
   queue.close()
 
   const output = await captureLog(() =>
