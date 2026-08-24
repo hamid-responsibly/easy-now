@@ -1,11 +1,11 @@
-import { mkdirSync, statSync } from 'node:fs'
+import { statSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import {
   getProcessStartTime,
   killProcessTree,
   processIdentityMatches,
 } from './process-liveness.js'
-import { queueDatabasePath } from './paths.js'
+import { canonicalDataDir, queueDatabasePath } from './paths.js'
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS queue (
@@ -52,17 +52,29 @@ type QueueRow = {
   updated_at: string
 }
 
+export type StartAttempt =
+  | { started: true }
+  | { started: false; position: number; length: number }
+
+export type RunningTaskClaim = {
+  taskId: number
+  queueName: string
+  holderPid: number
+}
+
 export type TaskQueue = {
   enqueue(input: {
     queueName: string
     command: string
     cwd: string
   }): number
-  tryStart(taskId: number, queueName: string): { started: boolean; position: number }
+  tryStart(taskId: number, queueName: string): StartAttempt
+  holdsRunningTask(claim: RunningTaskClaim): boolean
   setChildPid(taskId: number, childPid: number): void
   heartbeat(taskId: number): void
   release(taskId: number): void
   list(queueName?: string): QueueTask[]
+  snapshot(queueName?: string): QueueTask[]
   clear(queueName?: string): number
   cleanup(queueName: string): void
   close(): void
@@ -79,7 +91,9 @@ type QueueCleanupRow = Pick<
   'id' | 'pid' | 'pid_started_at' | 'child_pid' | 'child_started_at'
 >
 type QueueChildRow = Pick<QueueRow, 'child_pid' | 'child_started_at'>
-type QueuePositionRow = { count: number }
+type QueueNameRow = Pick<QueueRow, 'queue_name'>
+type QueueHolderRow = Pick<QueueRow, 'queue_name' | 'status' | 'pid' | 'pid_started_at'>
+type QueuePlaceRow = { position: number; length: number }
 
 export class QueueClearedError extends Error {
   readonly exitCode = 75
@@ -91,9 +105,9 @@ export class QueueClearedError extends Error {
 }
 
 export function openQueue(dataDir: string): TaskQueue {
-  mkdirSync(dataDir, { recursive: true, mode: 0o700 })
-  verifyDataDir(dataDir)
-  const db = new DatabaseSync(queueDatabasePath(dataDir), { timeout: 60_000 })
+  const canonicalDir = canonicalDataDir(dataDir)
+  verifyDataDir(canonicalDir)
+  const db = new DatabaseSync(queueDatabasePath(canonicalDir), { timeout: 60_000 })
   db.exec('PRAGMA journal_mode = WAL')
   db.exec('PRAGMA busy_timeout = 60000')
   db.exec(SCHEMA)
@@ -118,15 +132,17 @@ export function openQueue(dataDir: string): TaskQueue {
          WHERE queue_name = :queueName AND status = 'waiting' AND id < :taskId
        )`,
   )
-  const selectPosition = db.prepare(
-    `SELECT COUNT(*) AS count
+  const selectPlace = db.prepare(
+    `SELECT
+       COUNT(
+         CASE WHEN status = 'running' OR (status = 'waiting' AND id <= ?)
+           THEN 1
+         END
+       ) AS position,
+       COUNT(*) AS length
      FROM queue
-     WHERE queue_name = ?
-       AND (
-         status = 'running'
-         OR (status = 'waiting' AND id <= ?)
-       )`,
-  ) as unknown as ReadStatement<QueuePositionRow>
+     WHERE queue_name = ?`,
+  ) as unknown as ReadStatement<QueuePlaceRow>
   const updateChildPid = db.prepare(
     `UPDATE queue
      SET child_pid = ?, child_started_at = ?, updated_at = datetime('now')
@@ -138,6 +154,12 @@ export function openQueue(dataDir: string): TaskQueue {
   const selectById = db.prepare(
     `SELECT id FROM queue WHERE id = ?`,
   ) as unknown as ReadStatement<QueueIdRow>
+  const selectHolder = db.prepare(
+    `SELECT queue_name, status, pid, pid_started_at FROM queue WHERE id = ?`,
+  ) as unknown as ReadStatement<QueueHolderRow>
+  const selectQueueNames = db.prepare(
+    `SELECT DISTINCT queue_name FROM queue`,
+  ) as unknown as ReadStatement<QueueNameRow>
   const deleteById = db.prepare(`DELETE FROM queue WHERE id = ?`)
   const selectByQueue = db.prepare(
     `SELECT id, queue_name, status, pid, pid_started_at,
@@ -189,10 +211,7 @@ export function openQueue(dataDir: string): TaskQueue {
     return Number(result.lastInsertRowid)
   }
 
-  function tryStart(
-    taskId: number,
-    queueName: string,
-  ): { started: boolean; position: number } {
+  function tryStart(taskId: number, queueName: string): StartAttempt {
     const ownerStartedAt = getProcessStartTime(process.pid)
     if (!ownerStartedAt) {
       throw new Error(`Cannot read process start time for pid ${process.pid}`)
@@ -204,13 +223,34 @@ export function openQueue(dataDir: string): TaskQueue {
       ':ownerStartedAt': ownerStartedAt,
     })
     if (updated.changes > 0) {
-      return { started: true, position: 0 }
+      return { started: true }
     }
     if (!selectById.get(taskId)) {
       throw new QueueClearedError(taskId)
     }
-    const position = Number(selectPosition.get(queueName, taskId)?.count ?? 1)
-    return { started: false, position }
+    const place = selectPlace.get(taskId, queueName)
+    return {
+      started: false,
+      position: Number(place?.position ?? 1),
+      length: Number(place?.length ?? 1),
+    }
+  }
+
+  function holdsRunningTask({
+    taskId,
+    queueName,
+    holderPid,
+  }: RunningTaskClaim): boolean {
+    const holder = selectHolder.get(taskId)
+    if (
+      !holder ||
+      holder.status !== 'running' ||
+      holder.queue_name !== queueName ||
+      holder.pid !== holderPid
+    ) {
+      return false
+    }
+    return processIdentityMatches(holder.pid, holder.pid_started_at) === true
   }
 
   function setChildPid(taskId: number, childPid: number): void {
@@ -235,6 +275,14 @@ export function openQueue(dataDir: string): TaskQueue {
   function list(queueName?: string): QueueTask[] {
     const rows = queueName ? selectByQueue.all(queueName) : selectAll.all()
     return rows.map(toQueueTask)
+  }
+
+  function snapshot(queueName?: string): QueueTask[] {
+    const names = queueName
+      ? [queueName]
+      : selectQueueNames.all().map((row) => row.queue_name)
+    names.forEach((name) => cleanup(name))
+    return list(queueName)
   }
 
   function clear(queueName?: string): number {
@@ -287,10 +335,12 @@ export function openQueue(dataDir: string): TaskQueue {
   return {
     enqueue,
     tryStart,
+    holdsRunningTask,
     setChildPid,
     heartbeat,
     release,
     list,
+    snapshot,
     clear,
     cleanup,
     close,

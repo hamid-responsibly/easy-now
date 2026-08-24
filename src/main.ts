@@ -103,15 +103,9 @@ function printList(parsed: Extract<ParsedCli, { kind: 'list' }>): void {
   const scopedName = parsed.all
     ? undefined
     : parsed.queue ?? defaultQueueName(cwd)
-  const tasks = withQueue(resolveDataDir(parsed.dataDir), (queue) => {
-    const names = scopedName
-      ? [scopedName]
-      : [...new Set(queue.list().map((task) => task.queueName))]
-    for (const name of names) {
-      queue.cleanup(name)
-    }
-    return queue.list(scopedName)
-  })
+  const tasks = withQueue(resolveDataDir(parsed.dataDir), (queue) =>
+    queue.snapshot(scopedName),
+  )
   const peeks = peekQueues(tasks, scopedName)
   if (parsed.json) {
     console.log(JSON.stringify({ queues: peeks }, null, 2))

@@ -1,22 +1,31 @@
-export type SharedCliFlags = {
+/** Which queue a command talks to. */
+export type QueueTarget = {
   queue?: string
-  timeoutSeconds?: number
   cwd?: string
   dataDir?: string
+}
+
+/** A command that takes a slot in the queue and may be killed on a timeout. */
+export type CommandOptions = QueueTarget & {
+  timeoutSeconds?: number
+}
+
+/** One queue, or every queue on the machine. */
+export type InspectScope = QueueTarget & {
   all?: boolean
-  json?: boolean
 }
 
 export type ParsedCli =
-  | ({ kind: 'help' } & SharedCliFlags)
-  | ({ kind: 'version' } & SharedCliFlags)
-  | ({ kind: 'list' } & SharedCliFlags)
-  | ({ kind: 'clear' } & SharedCliFlags)
-  | ({ kind: 'run'; script: string; scriptArgs: string[] } & SharedCliFlags)
-  | ({ kind: 'exec'; argv: string[] } & SharedCliFlags)
+  | { kind: 'help' }
+  | { kind: 'version' }
+  | ({ kind: 'list'; json?: boolean } & InspectScope)
+  | ({ kind: 'clear' } & InspectScope)
+  | ({ kind: 'run'; script: string; scriptArgs: string[] } & CommandOptions)
+  | ({ kind: 'exec'; argv: string[] } & CommandOptions)
 
 type Verb = 'run' | 'list' | 'clear' | 'status' | 'peek' | 'help'
-type InternalFlags = SharedCliFlags & { help?: true; version?: true }
+type InternalFlags = CommandOptions &
+  InspectScope & { json?: boolean; help?: true; version?: true }
 
 const FLAGS = {
   '-q': 'queue',
@@ -49,7 +58,7 @@ export function parseCli(argv: string[]): ParsedCli {
 
   const afterVerb = consumeLeadingFlags(tail)
   const flags = { ...leading.flags, ...afterVerb.flags }
-  return parseMeta(flags) ?? parseVerb(first, afterVerb.rest, sharedFlags(flags))
+  return parseMeta(flags) ?? parseVerb(first, afterVerb.rest, flags)
 }
 
 function consumeLeadingFlags(argv: string[]): {
@@ -128,28 +137,23 @@ function consumeLeadingFlags(argv: string[]): {
   return { flags, rest: argv.slice(index), sawDoubleDash: false }
 }
 
-function parseVerb(
-  verb: Verb,
-  rest: string[],
-  flags: SharedCliFlags,
-): ParsedCli {
-  if (flags.all && flags.queue) {
-    throw new Error('--all and --queue cannot be used together')
-  }
+function parseVerb(verb: Verb, rest: string[], flags: InternalFlags): ParsedCli {
   switch (verb) {
     case 'help':
-      return { kind: 'help', ...flags }
+      return { kind: 'help' }
     case 'list':
     case 'status':
     case 'peek':
       requireNoArguments(verb, rest)
-      return { kind: 'list', ...flags }
+      return flags.json
+        ? { kind: 'list', json: true, ...inspectScope(flags) }
+        : { kind: 'list', ...inspectScope(flags) }
     case 'clear':
       requireNoArguments(verb, rest)
-      requireListForJson(flags)
-      return { kind: 'clear', ...flags }
+      rejectJson(flags)
+      return { kind: 'clear', ...inspectScope(flags) }
     case 'run': {
-      requireInspectFlags(flags)
+      const options = commandOptions(flags)
       const script = rest[0]
       if (!script) {
         throw new Error('Usage: easy-now run <script> [...args]')
@@ -159,7 +163,7 @@ function parseVerb(
         kind: 'run',
         script,
         scriptArgs: scriptArgs[0] === '--' ? scriptArgs.slice(1) : scriptArgs,
-        ...flags,
+        ...options,
       }
     }
     default: {
@@ -170,30 +174,47 @@ function parseVerb(
 }
 
 function parseExec(argv: string[], flags: InternalFlags): ParsedCli {
-  requireInspectFlags(flags)
+  const options = commandOptions(flags)
   return (
     parseMeta(flags) ??
-    (argv.length === 0
-      ? { kind: 'help', ...sharedFlags(flags) }
-      : { kind: 'exec', argv, ...sharedFlags(flags) })
+    (argv.length === 0 ? { kind: 'help' } : { kind: 'exec', argv, ...options })
   )
 }
 
 function parseMeta(flags: InternalFlags): ParsedCli | null {
-  const shared = sharedFlags(flags)
   return flags.help
-    ? { kind: 'help', ...shared }
+    ? { kind: 'help' }
     : flags.version
-      ? { kind: 'version', ...shared }
+      ? { kind: 'version' }
       : null
 }
 
-function sharedFlags({
+function inspectScope({
+  json: _json,
   help: _help,
   version: _version,
-  ...shared
-}: InternalFlags): SharedCliFlags {
-  return shared
+  timeoutSeconds: _timeoutSeconds,
+  ...scope
+}: InternalFlags): InspectScope {
+  if (scope.all && scope.queue) {
+    throw new Error('--all and --queue cannot be used together')
+  }
+  return scope
+}
+
+function commandOptions(flags: InternalFlags): CommandOptions {
+  rejectJson(flags)
+  if (flags.all) {
+    throw new Error('--all can only be used with list or clear')
+  }
+  const {
+    all: _all,
+    json: _json,
+    help: _help,
+    version: _version,
+    ...options
+  } = flags
+  return options
 }
 
 function isVerb(value: string): value is Verb {
@@ -206,16 +227,9 @@ function requireNoArguments(verb: Verb, rest: string[]): void {
   }
 }
 
-function requireListForJson({ json }: SharedCliFlags): void {
+function rejectJson({ json }: InternalFlags): void {
   if (json) {
     throw new Error('--json can only be used with list')
-  }
-}
-
-function requireInspectFlags(flags: SharedCliFlags): void {
-  requireListForJson(flags)
-  if (flags.all) {
-    throw new Error('--all can only be used with list or clear')
   }
 }
 

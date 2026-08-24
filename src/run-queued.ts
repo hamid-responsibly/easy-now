@@ -5,7 +5,7 @@ import {
   killProcessTree,
   type ProcessSignal,
 } from './process-liveness.js'
-import { heldTaskId, holdingChildEnv } from './queue-holding.js'
+import { heldTaskId, leaseChildEnv } from './queue-holding.js'
 import { defaultQueueName } from './queue-name.js'
 import {
   isSqliteBusy,
@@ -74,7 +74,7 @@ export async function runQueued({
         argv,
         cwd,
         timeoutSeconds,
-        extraEnv: holdingChildEnv({
+        extraEnv: leaseChildEnv({
           dataDir: resolvedDir,
           queueName,
           taskId,
@@ -101,12 +101,11 @@ async function waitForTurn(
   for (;;) {
     try {
       queue.cleanup(queueName)
-      const { started, position } = queue.tryStart(taskId, queueName)
-      if (started) {
+      const attempt = queue.tryStart(taskId, queueName)
+      if (attempt.started) {
         return
       }
-      const length = queue.list(queueName).length
-      const line = `easy-now: place ${position} of ${length} in ${queueName}\n`
+      const line = `easy-now: place ${attempt.position} of ${attempt.length} in ${queueName}\n`
       if (line !== lastLine) {
         process.stderr.write(line)
         lastLine = line

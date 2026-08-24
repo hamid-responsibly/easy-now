@@ -46,6 +46,16 @@ test('parses list and clear', () => {
   })
 })
 
+test('each command keeps only the flags it can act on', () => {
+  assert.deepEqual(parseCli(['-t', '30', 'list']), { kind: 'list' })
+  assert.deepEqual(parseCli(['-t', '30', '--all', 'clear']), {
+    kind: 'clear',
+    all: true,
+  })
+  assert.deepEqual(parseCli(['-q', 'app', '--help', 'list']), { kind: 'help' })
+  assert.deepEqual(parseCli(['-q', 'app', '-v']), { kind: 'version' })
+})
+
 test('accepts known flags immediately after a verb', () => {
   const parsed = parseCli(['clear', '-q', 'app', '--data-dir=/tmp/easy'])
   assert.equal(parsed.kind, 'clear')
