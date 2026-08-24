@@ -1,7 +1,13 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { setTimeout as delay } from 'node:timers/promises'
 
 export type ProcessSignal = 'SIGINT' | 'SIGTERM'
+
+/** Whether a signal can still reach a process group. */
+type GroupReach = 'gone' | 'alive' | 'unreachable'
+
+const TERMINATION_POLL_MS = 25
 
 export function isProcessAlive(pid: number | null | undefined): boolean {
   if (pid == null || pid <= 0) {
@@ -103,31 +109,79 @@ export function processIdentityMatches(
   return currentStartTime == null ? null : currentStartTime === startedAt
 }
 
-export function killProcessTree(
-  pid: number,
+/**
+ * Stops the process group led by `leaderPid` and resolves only once the whole
+ * group is gone. Commands are spawned detached, so the direct child leads the
+ * group and its descendants share the group id.
+ */
+export async function terminateProcessGroup(
+  leaderPid: number,
   signal: ProcessSignal = 'SIGTERM',
   graceMs = 2_000,
-): void {
-  if (!isProcessAlive(pid)) {
+): Promise<void> {
+  if (groupReach(leaderPid) !== 'alive') {
     return
   }
 
-  signalProcessTree(pid, signal)
-  const escalation = setTimeout(() => signalProcessTree(pid, 'SIGKILL'), graceMs)
-  escalation.unref()
-}
-
-function signalProcessTree(
-  pid: number,
-  signal: ProcessSignal | 'SIGKILL',
-): void {
-  try {
-    process.kill(-pid, signal)
-  } catch {
-    try {
-      process.kill(pid, signal)
-    } catch {
-      return
+  signalGroup(leaderPid, signal)
+  const escalateAt = Date.now() + graceMs
+  for (;;) {
+    await delay(TERMINATION_POLL_MS)
+    const reach = groupReach(leaderPid)
+    switch (reach) {
+      case 'gone':
+      case 'unreachable':
+        return
+      case 'alive':
+        break
+      default: {
+        const exhaustive: never = reach
+        throw new Error(`Unknown process group state: ${String(exhaustive)}`)
+      }
+    }
+    if (Date.now() >= escalateAt) {
+      signalGroup(leaderPid, 'SIGKILL')
     }
   }
+}
+
+export function isProcessGroupAlive(leaderPid: number): boolean {
+  return groupReach(leaderPid) === 'alive'
+}
+
+function groupReach(leaderPid: number): GroupReach {
+  if (leaderPid <= 1) {
+    return 'gone'
+  }
+
+  try {
+    process.kill(-leaderPid, 0)
+    return 'alive'
+  } catch (error) {
+    return errorCode(error) === 'EPERM' ? 'unreachable' : 'gone'
+  }
+}
+
+function signalGroup(
+  leaderPid: number,
+  signal: ProcessSignal | 'SIGKILL',
+): void {
+  if (leaderPid <= 1) {
+    return
+  }
+
+  try {
+    process.kill(-leaderPid, signal)
+  } catch {
+    return
+  }
+}
+
+function errorCode(error: unknown): string | undefined {
+  return typeof error === 'object' &&
+    error != null &&
+    'code' in error &&
+    typeof error.code === 'string'
+    ? error.code
+    : undefined
 }

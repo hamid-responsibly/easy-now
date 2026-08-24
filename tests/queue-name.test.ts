@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { main } from '../src/main.js'
 import {
   defaultQueueName,
   normalizeGitRemoteUrl,
@@ -62,6 +63,69 @@ test('worktrees of a local-only repo share the common git directory', () => {
   git(main, ['worktree', 'add', worktree])
   assert.equal(defaultQueueName(worktree), defaultQueueName(main))
   assert.match(defaultQueueName(main), /\.git$/)
+})
+
+test('a relative local remote resolves against the checkout that owns it', () => {
+  const root = tempDir()
+  const upstream = join(root, 'upstream.git')
+  const clone = join(root, 'clone')
+  mkdirSync(upstream)
+  mkdirSync(clone)
+  git(upstream, ['init', '--bare'])
+  gitRepo(clone, '../upstream.git')
+
+  assert.equal(defaultQueueName(clone), realpathSync(upstream))
+})
+
+test('a relative local remote names one queue from any start directory', () => {
+  const root = tempDir()
+  const upstream = join(root, 'upstream.git')
+  const clone = join(root, 'clone')
+  const nested = join(clone, 'packages', 'web')
+  mkdirSync(upstream)
+  mkdirSync(clone)
+  mkdirSync(nested, { recursive: true })
+  git(upstream, ['init', '--bare'])
+  gitRepo(clone, '../upstream.git')
+
+  assert.equal(defaultQueueName(nested), defaultQueueName(clone))
+})
+
+test('two checkouts of one relative remote share a queue', () => {
+  const root = tempDir()
+  const upstream = join(root, 'upstream.git')
+  const near = join(root, 'near')
+  const far = join(root, 'nested', 'far')
+  mkdirSync(upstream)
+  mkdirSync(near)
+  mkdirSync(far, { recursive: true })
+  git(upstream, ['init', '--bare'])
+  gitRepo(near, '../upstream.git')
+  gitRepo(far, '../../upstream.git')
+
+  assert.equal(defaultQueueName(far), defaultQueueName(near))
+})
+
+test('the cli reads the queue of the directory it is pointed at', async () => {
+  const root = tempDir()
+  const upstream = join(root, 'upstream.git')
+  const clone = join(root, 'clone')
+  mkdirSync(upstream)
+  mkdirSync(clone)
+  git(upstream, ['init', '--bare'])
+  gitRepo(clone, '../upstream.git')
+
+  const lines: string[] = []
+  const original = console.log
+  console.log = (...values: unknown[]) => {
+    lines.push(values.map(String).join(' '))
+  }
+  try {
+    assert.equal(await main(['--data-dir', tempDir(), '-C', clone, 'list']), 0)
+  } finally {
+    console.log = original
+  }
+  assert.deepEqual(lines, [`${realpathSync(upstream)}: 0 running, 0 waiting`])
 })
 
 test('a directory without git falls back to the package root', () => {

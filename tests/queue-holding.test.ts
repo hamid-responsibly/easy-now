@@ -193,7 +193,7 @@ test('malformed lease markers are ignored and never claim task 0', () => {
 function startTask(dataDir: string, queueName: string): number {
   return withQueue(dataDir, (queue) => {
     const taskId = queue.enqueue({ queueName, command: 'build', cwd: '/tmp' })
-    assert.equal(queue.tryStart(taskId, queueName).started, true)
+    assert.equal(queue.tryStart(taskId).started, true)
     return taskId
   })
 }

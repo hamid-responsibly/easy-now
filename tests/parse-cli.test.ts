@@ -47,13 +47,83 @@ test('parses list and clear', () => {
 })
 
 test('each command keeps only the flags it can act on', () => {
-  assert.deepEqual(parseCli(['-t', '30', 'list']), { kind: 'list' })
-  assert.deepEqual(parseCli(['-t', '30', '--all', 'clear']), {
-    kind: 'clear',
-    all: true,
-  })
   assert.deepEqual(parseCli(['-q', 'app', '--help', 'list']), { kind: 'help' })
   assert.deepEqual(parseCli(['-q', 'app', '-v']), { kind: 'version' })
+  assert.deepEqual(parseCli(['--json', 'list']), { kind: 'list', json: true })
+  assert.deepEqual(parseCli(['--all', 'clear']), { kind: 'clear', all: true })
+})
+
+test('help wins over an unsupported flag, wherever it appears', () => {
+  const helpArgs = [
+    ['--json', '--help'],
+    ['--help', '--json'],
+    ['--all', '--help'],
+    ['--help', '--all'],
+    ['--json', '--help', '--', 'ls'],
+    ['-t', '30', '--help', 'list'],
+    ['list', '-t', '30', '--help'],
+    ['--json', '-h', 'run'],
+    ['run', '--all', '-h'],
+  ]
+  helpArgs.forEach((argv) =>
+    assert.deepEqual(parseCli(argv), { kind: 'help' }, argv.join(' ')),
+  )
+})
+
+test('version wins over an unsupported flag, wherever it appears', () => {
+  const versionArgs = [
+    ['--json', '--version'],
+    ['--version', '--json'],
+    ['--all', '-v'],
+    ['-t', '30', 'list', '-v'],
+    ['clear', '--json', '-v'],
+  ]
+  versionArgs.forEach((argv) =>
+    assert.deepEqual(parseCli(argv), { kind: 'version' }, argv.join(' ')),
+  )
+})
+
+test('timeout is rejected by the commands that cannot honour it', () => {
+  const timeoutArgs = [
+    ['-t', '30', 'list'],
+    ['list', '-t', '30'],
+    ['-t', '30', 'peek'],
+    ['-t', '30', 'status'],
+    ['-t', '30', '--all', 'clear'],
+    ['clear', '--timeout=30'],
+  ]
+  timeoutArgs.forEach((argv) =>
+    assert.throws(
+      () => parseCli(argv),
+      /--timeout can only be used with run or a command/,
+      argv.join(' '),
+    ),
+  )
+})
+
+test('list and clear reject the flags of a queued command', () => {
+  assert.throws(() => parseCli(['clear', '--json']), /--json can only be used with list/)
+  assert.throws(() => parseCli(['--json', 'clear']), /--json can only be used with list/)
+})
+
+test('run and exec reject the flags of an inspection command', () => {
+  const rejected = [
+    ['run', '--json', 'build'],
+    ['--json', 'run', 'build'],
+    ['run', '--all', 'build'],
+    ['--all', 'run', 'build'],
+    ['--json', '--', 'ls'],
+    ['--all', '--', 'ls'],
+    ['--json', 'vitest'],
+    ['--all', 'vitest'],
+  ]
+  rejected.forEach((argv) =>
+    assert.throws(
+      () => parseCli(argv),
+      /--json can only be used with list|--all can only be used with list or clear/,
+      argv.join(' '),
+    ),
+  )
 })
 
 test('accepts known flags immediately after a verb', () => {

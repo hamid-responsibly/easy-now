@@ -2,10 +2,12 @@ import { statSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import {
   getProcessStartTime,
-  killProcessTree,
   processIdentityMatches,
+  terminateProcessGroup,
 } from './process-liveness.js'
 import { canonicalDataDir, queueDatabasePath } from './paths.js'
+
+export const SCHEMA_VERSION = 1
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS queue (
@@ -68,15 +70,17 @@ export type TaskQueue = {
     command: string
     cwd: string
   }): number
-  tryStart(taskId: number, queueName: string): StartAttempt
+  tryStart(taskId: number): StartAttempt
   holdsRunningTask(claim: RunningTaskClaim): boolean
   setChildPid(taskId: number, childPid: number): void
   heartbeat(taskId: number): void
   release(taskId: number): void
   list(queueName?: string): QueueTask[]
   snapshot(queueName?: string): QueueTask[]
-  clear(queueName?: string): number
-  cleanup(queueName: string): void
+  /** Resolves once every command it stopped is really gone. */
+  clear(queueName?: string): Promise<number>
+  /** Resolves once every abandoned command it stopped is really gone. */
+  cleanup(queueName: string): Promise<void>
   close(): void
 }
 
@@ -111,25 +115,25 @@ export function openQueue(dataDir: string): TaskQueue {
   db.exec('PRAGMA journal_mode = WAL')
   db.exec('PRAGMA busy_timeout = 60000')
   db.exec(SCHEMA)
-  addIdentityColumn(db, 'pid_started_at')
-  addIdentityColumn(db, 'child_started_at')
+  migrate(db)
 
   const insertWaiting = db.prepare(
     `INSERT INTO queue (queue_name, status, pid, pid_started_at, command, cwd)
      VALUES (?, 'waiting', ?, ?, ?, ?)`,
   )
   const admitWaiting = db.prepare(
-    `UPDATE queue
+    `UPDATE queue AS task
      SET status = 'running', updated_at = datetime('now'),
          pid = :pid, pid_started_at = :ownerStartedAt
-     WHERE id = :taskId AND status = 'waiting'
+     WHERE task.id = :taskId AND task.status = 'waiting'
        AND NOT EXISTS (
-         SELECT 1 FROM queue
-         WHERE queue_name = :queueName AND status = 'running'
+         SELECT 1 FROM queue AS other
+         WHERE other.queue_name = task.queue_name AND other.status = 'running'
        )
        AND NOT EXISTS (
-         SELECT 1 FROM queue
-         WHERE queue_name = :queueName AND status = 'waiting' AND id < :taskId
+         SELECT 1 FROM queue AS other
+         WHERE other.queue_name = task.queue_name AND other.status = 'waiting'
+           AND other.id < task.id
        )`,
   )
   const selectPlace = db.prepare(
@@ -141,7 +145,7 @@ export function openQueue(dataDir: string): TaskQueue {
        ) AS position,
        COUNT(*) AS length
      FROM queue
-     WHERE queue_name = ?`,
+     WHERE queue_name = (SELECT queue_name FROM queue WHERE id = ?)`,
   ) as unknown as ReadStatement<QueuePlaceRow>
   const updateChildPid = db.prepare(
     `UPDATE queue
@@ -191,6 +195,10 @@ export function openQueue(dataDir: string): TaskQueue {
   ) as unknown as ReadStatement<QueueChildRow>
   const deleteByQueue = db.prepare(`DELETE FROM queue WHERE queue_name = ?`)
   const deleteAll = db.prepare(`DELETE FROM queue`)
+  const deleteWaitingByQueue = db.prepare(
+    `DELETE FROM queue WHERE queue_name = ? AND status = 'waiting'`,
+  )
+  const deleteAllWaiting = db.prepare(`DELETE FROM queue WHERE status = 'waiting'`)
 
   function enqueue(input: {
     queueName: string
@@ -211,14 +219,13 @@ export function openQueue(dataDir: string): TaskQueue {
     return Number(result.lastInsertRowid)
   }
 
-  function tryStart(taskId: number, queueName: string): StartAttempt {
+  function tryStart(taskId: number): StartAttempt {
     const ownerStartedAt = getProcessStartTime(process.pid)
     if (!ownerStartedAt) {
       throw new Error(`Cannot read process start time for pid ${process.pid}`)
     }
     const updated = admitWaiting.run({
       ':taskId': taskId,
-      ':queueName': queueName,
       ':pid': process.pid,
       ':ownerStartedAt': ownerStartedAt,
     })
@@ -228,7 +235,7 @@ export function openQueue(dataDir: string): TaskQueue {
     if (!selectById.get(taskId)) {
       throw new QueueClearedError(taskId)
     }
-    const place = selectPlace.get(taskId, queueName)
+    const place = selectPlace.get(taskId, taskId)
     return {
       started: false,
       position: Number(place?.position ?? 1),
@@ -281,51 +288,69 @@ export function openQueue(dataDir: string): TaskQueue {
     const names = queueName
       ? [queueName]
       : selectQueueNames.all().map((row) => row.queue_name)
-    names.forEach((name) => cleanup(name))
+    names.forEach((name) => dropFinishedRows(name))
     return list(queueName)
   }
 
-  function clear(queueName?: string): number {
+  /**
+   * Waiters go first, so none of them takes the slot while the running command
+   * is still being stopped. The running rows only go once their process groups
+   * are gone. The count is taken up front because an owner can release its own
+   * row while its command is stopping.
+   */
+  async function clear(queueName?: string): Promise<number> {
     const children = queueName
       ? selectQueueChildren.all(queueName)
       : selectAllChildren.all()
-    children
-      .filter(
-        ({ child_pid, child_started_at }) =>
-          processIdentityMatches(child_pid, child_started_at) === true,
-      )
-      .forEach(({ child_pid }) => {
-        if (child_pid != null) {
-          killProcessTree(child_pid)
-        }
-      })
-    const deleted = queueName
-      ? deleteByQueue.run(queueName)
-      : deleteAll.run()
-    return Number(deleted.changes)
+    const cleared = list(queueName).length
+    if (queueName) {
+      deleteWaitingByQueue.run(queueName)
+    } else {
+      deleteAllWaiting.run()
+    }
+    await Promise.all(
+      liveChildPids(children).map((childPid) =>
+        terminateProcessGroup(childPid),
+      ),
+    )
+    if (queueName) {
+      deleteByQueue.run(queueName)
+    } else {
+      deleteAll.run()
+    }
+    return cleared
   }
 
-  function cleanup(queueName: string): void {
-    selectCleanupRows
+  async function cleanup(queueName: string): Promise<void> {
+    const abandoned = dropFinishedRows(queueName)
+    if (abandoned.length === 0) {
+      return
+    }
+    await Promise.all(
+      abandoned.map((childPid) => terminateProcessGroup(childPid)),
+    )
+    dropFinishedRows(queueName)
+  }
+
+  /**
+   * Deletes rows whose owner died and whose command is gone. Returns the
+   * commands that outlived their owner; their rows stay until they stop.
+   */
+  function dropFinishedRows(queueName: string): number[] {
+    const deadOwners = selectCleanupRows
       .all(queueName)
       .filter(
         ({ pid, pid_started_at }) =>
           processIdentityMatches(pid, pid_started_at) === false,
       )
-      .forEach(({ id, child_pid, child_started_at }) => {
-        const childMatches =
-          child_pid == null
-            ? false
-            : processIdentityMatches(child_pid, child_started_at)
-        if (child_pid != null && childMatches === true) {
-          killProcessTree(child_pid)
-          return
-        }
-        if (childMatches == null) {
-          return
-        }
-        deleteById.run(id)
-      })
+    deadOwners
+      .filter(
+        ({ child_pid, child_started_at }) =>
+          child_pid == null ||
+          processIdentityMatches(child_pid, child_started_at) === false,
+      )
+      .forEach(({ id }) => deleteById.run(id))
+    return liveChildPids(deadOwners)
   }
 
   function close(): void {
@@ -345,6 +370,17 @@ export function openQueue(dataDir: string): TaskQueue {
     cleanup,
     close,
   }
+}
+
+function liveChildPids(
+  rows: Array<Pick<QueueRow, 'child_pid' | 'child_started_at'>>,
+): number[] {
+  return rows.flatMap(({ child_pid, child_started_at }) =>
+    child_pid != null &&
+    processIdentityMatches(child_pid, child_started_at) === true
+      ? [child_pid]
+      : [],
+  )
 }
 
 function toQueueTask(row: QueueRow): QueueTask {
@@ -381,18 +417,54 @@ function verifyDataDir(dataDir: string): void {
   }
 }
 
-function addIdentityColumn(
-  db: DatabaseSync,
-  column: 'pid_started_at' | 'child_started_at',
-): void {
-  try {
-    db.exec(`ALTER TABLE queue ADD COLUMN ${column} TEXT`)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    if (!message.includes('duplicate column name')) {
-      throw error
-    }
+/**
+ * Brings an older database up to SCHEMA_VERSION. Databases written before this
+ * version was recorded report 0, so the identity columns are added by looking
+ * at the table itself rather than by trying and failing.
+ */
+function migrate(db: DatabaseSync): void {
+  if (readUserVersion(db) >= SCHEMA_VERSION) {
+    return
   }
+
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    if (readUserVersion(db) < SCHEMA_VERSION) {
+      addMissingIdentityColumns(db)
+      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
+    }
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+}
+
+function addMissingIdentityColumns(db: DatabaseSync): void {
+  const existing = new Set(
+    (
+      db.prepare(`PRAGMA table_info(queue)`) as unknown as ReadStatement<{
+        name: string
+      }>
+    )
+      .all()
+      .map((column) => column.name),
+  )
+  const identityColumns = ['pid_started_at', 'child_started_at'] as const
+  identityColumns
+    .filter((column) => !existing.has(column))
+    .forEach((column) =>
+      db.exec(`ALTER TABLE queue ADD COLUMN ${column} TEXT`),
+    )
+}
+
+function readUserVersion(db: DatabaseSync): number {
+  const row = (
+    db.prepare(`PRAGMA user_version`) as unknown as ReadStatement<{
+      user_version: number
+    }>
+  ).get()
+  return Number(row?.user_version ?? 0)
 }
 
 export function isSqliteBusy(error: unknown): boolean {
@@ -409,6 +481,19 @@ export function isSqliteBusy(error: unknown): boolean {
     errcode === 6 ||
     message.includes('database is locked')
   )
+}
+
+/** Clearing stops live commands, so it cannot run through the sync withQueue. */
+export async function clearQueue(
+  dataDir: string,
+  queueName?: string,
+): Promise<number> {
+  const queue = openQueue(dataDir)
+  try {
+    return await queue.clear(queueName)
+  } finally {
+    queue.close()
+  }
 }
 
 export function withQueue<T>(
