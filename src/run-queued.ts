@@ -5,6 +5,7 @@ import {
   killProcessTree,
   type ProcessSignal,
 } from './process-liveness.js'
+import { heldTaskId, holdingChildEnv } from './queue-holding.js'
 import { defaultQueueName } from './queue-name.js'
 import {
   isSqliteBusy,
@@ -40,7 +41,22 @@ export async function runQueued({
   timeoutSeconds,
 }: RunQueuedOptions): Promise<RunQueuedResult> {
   const queueName = requestedQueueName ?? defaultQueueName(cwd)
-  const queue = openQueue(resolveDataDir(dataDir))
+  const resolvedDir = resolveDataDir(dataDir)
+  const alreadyHeld = heldTaskId({ dataDir: resolvedDir, queueName })
+  if (alreadyHeld != null) {
+    process.stderr.write(
+      `easy-now: already in ${queueName}; running without taking another slot\n`,
+    )
+    const exitCode = await runChild({
+      command,
+      argv,
+      cwd,
+      timeoutSeconds,
+    })
+    return { exitCode, taskId: alreadyHeld, queueName }
+  }
+
+  const queue = openQueue(resolvedDir)
   const displayCommand = [command, ...argv].join(' ')
   const taskId = queue.enqueue({
     queueName,
@@ -58,6 +74,11 @@ export async function runQueued({
         argv,
         cwd,
         timeoutSeconds,
+        extraEnv: holdingChildEnv({
+          dataDir: resolvedDir,
+          queueName,
+          taskId,
+        }),
         onSpawn: (childPid) => queue.setChildPid(taskId, childPid),
       })
       return { exitCode, taskId, queueName }
@@ -76,7 +97,7 @@ async function waitForTurn(
   queueName: string,
   pollMs: number,
 ): Promise<void> {
-  let lastPosition: number | undefined
+  let lastLine: string | undefined
   for (;;) {
     try {
       queue.cleanup(queueName)
@@ -84,12 +105,11 @@ async function waitForTurn(
       if (started) {
         return
       }
-      if (process.stderr.isTTY && position !== lastPosition) {
-        const ahead = Math.max(0, position - 1)
-        process.stderr.write(
-          `easy-now: waiting behind ${ahead} task(s) in ${queueName}\n`,
-        )
-        lastPosition = position
+      const length = queue.list(queueName).length
+      const line = `easy-now: place ${position} of ${length} in ${queueName}\n`
+      if (line !== lastLine) {
+        process.stderr.write(line)
+        lastLine = line
       }
     } catch (error) {
       if (!isSqliteBusy(error)) {
@@ -122,17 +142,19 @@ async function runChild({
   argv,
   cwd,
   timeoutSeconds,
+  extraEnv,
   onSpawn,
 }: {
   command: string
   argv: string[]
   cwd: string
   timeoutSeconds?: number
-  onSpawn: (childPid: number) => void
+  extraEnv?: Record<string, string>
+  onSpawn?: (childPid: number) => void
 }): Promise<number> {
   const child = spawn(command, argv, {
     cwd,
-    env: process.env,
+    env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
     stdio: 'inherit',
     detached: true,
   })
@@ -146,7 +168,7 @@ async function runChild({
   }
 
   try {
-    onSpawn(childPid)
+    onSpawn?.(childPid)
   } catch (error) {
     killProcessTree(childPid)
     await new Promise<void>((resolve) => {

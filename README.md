@@ -36,6 +36,8 @@ easy-now run build
 easy-now run test -- --watch
 ```
 
+Pick one of those paths for a given script. If a script is already wrapped and you also run `easy-now run <script>`, the inner `easy-now` sees that an ancestor already holds the same queue and data dir, and runs the command without taking a second slot. Without that, the outer process holds the only slot and the inner one waits forever.
+
 Any command works:
 
 ```bash
@@ -50,7 +52,7 @@ easy-now -t 30 run test -- -t 5
 easy-now -q build -- next build
 ```
 
-For `run`, `list`, `clear`, and `help`, flags can also go directly after the verb, before its first argument. Once a script or command starts, later flags belong to it. Everything after `--` is always literal command input. Use `--` when a command is named `run`, `list`, `clear`, `status`, or `help` so easy-now does not read it as a verb.
+For `run`, `list`, `clear`, and `help`, flags can also go directly after the verb, before its first argument. Once a script or command starts, later flags belong to it. Everything after `--` is always literal command input. Use `--` when a command is named `run`, `list`, `peek`, `clear`, `status`, or `help` so easy-now does not read it as a verb.
 
 ## Queues
 
@@ -74,12 +76,18 @@ Each named queue runs **one command at a time**. That is the whole policy in v1.
 
 ```bash
 easy-now list
+easy-now peek --json
+easy-now list --all
 easy-now clear
 easy-now clear -q build
 easy-now clear --all
 ```
 
+`list`, `peek`, and `status` are the same command. They show the current project queue: how many jobs are running and waiting, and each job's place in line. `--json` prints that as a stable object for agents. `--all` shows every queue on the machine.
+
 `clear` only clears the current project queue unless `--queue` names another queue. `clear --all` clears every queue.
+
+A waiter writes `easy-now: place N of M in <queue>` to stderr whenever its place changes, including when stderr is not a TTY, so agent logs can see progress.
 
 State lives in `~/.easy-now/queue.db` (override with `--data-dir` or `EASY_NOW_DATA_DIR`). easy-now creates the directory with mode `0700` and rejects directories owned by another user or writable by a group or other users. The file is not compatible with [Block's agent-task-queue](https://github.com/block/agent-task-queue). Mixing the two on one database would be a good way to lose tasks.
 

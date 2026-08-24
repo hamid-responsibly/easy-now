@@ -38,6 +38,12 @@ test('parses list and clear', () => {
   assert.equal(parseCli(['list']).kind, 'list')
   assert.equal(parseCli(['-q', 'app', 'clear']).kind, 'clear')
   assert.deepEqual(parseCli(['status']), { kind: 'list' })
+  assert.deepEqual(parseCli(['peek']), { kind: 'list' })
+  assert.deepEqual(parseCli(['list', '--json', '--all']), {
+    kind: 'list',
+    json: true,
+    all: true,
+  })
 })
 
 test('accepts known flags immediately after a verb', () => {
@@ -55,6 +61,10 @@ test('double dash always forces exec mode', () => {
   assert.deepEqual(parseCli(['--', 'list']), {
     kind: 'exec',
     argv: ['list'],
+  })
+  assert.deepEqual(parseCli(['--', 'peek']), {
+    kind: 'exec',
+    argv: ['peek'],
   })
   assert.deepEqual(parseCli(['--', 'run', 'build']), {
     kind: 'exec',
@@ -104,6 +114,16 @@ test('extra positionals after list and clear throw', () => {
   assert.throws(() => parseCli(['clear', 'app']), /does not accept arguments/)
   assert.throws(() => parseCli(['list', 'app']), /does not accept arguments/)
   assert.throws(() => parseCli(['status', 'app']), /does not accept arguments/)
+  assert.throws(() => parseCli(['peek', 'app']), /does not accept arguments/)
+})
+
+test('json is list-only and all is list or clear', () => {
+  assert.throws(() => parseCli(['--json', 'clear']), /--json can only be used with list/)
+  assert.throws(() => parseCli(['--json', '--', 'ls']), /--json can only be used with list/)
+  assert.throws(
+    () => parseCli(['--all', '--', 'ls']),
+    /--all can only be used with list or clear/,
+  )
 })
 
 test('all cannot be combined with a named queue', () => {

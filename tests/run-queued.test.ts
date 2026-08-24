@@ -118,6 +118,31 @@ test('releases the queue row when spawning throws', async () => {
   }
 })
 
+test('nested easy-now on the same queue runs instead of deadlocking', { timeout: 8_000 }, async () => {
+  const dataDir = tempDir()
+  const markerPath = join(dataDir, 'nested.txt')
+  const result = await runQueued({
+    command: process.execPath,
+    argv: [
+      '--import',
+      'tsx',
+      'src/cli.ts',
+      `--data-dir=${dataDir}`,
+      '-q',
+      'nested',
+      '--',
+      process.execPath,
+      '-e',
+      `require('fs').writeFileSync(${JSON.stringify(markerPath)}, 'ok')`,
+    ],
+    cwd: process.cwd(),
+    queueName: 'nested',
+    dataDir,
+  })
+  assert.equal(result.exitCode, 0)
+  assert.equal(readFileSync(markerPath, 'utf8'), 'ok')
+})
+
 test('defaults nested directories to the project root queue', async () => {
   const root = tempDir()
   const nested = join(root, 'packages', 'app')
@@ -139,15 +164,10 @@ test('invalid poll intervals fall back to the default', () => {
   assert.equal(pollInterval('40'), 40)
 })
 
-test('a TTY sees its queue position while waiting', async () => {
+test('a waiter writes its place to stderr even without a TTY', async () => {
   const dataDir = tempDir()
   const writes: string[] = []
   const originalWrite = process.stderr.write
-  const originalIsTTY = process.stderr.isTTY
-  Object.defineProperty(process.stderr, 'isTTY', {
-    configurable: true,
-    value: true,
-  })
   process.stderr.write = ((chunk: string | Uint8Array) => {
     writes.push(String(chunk))
     return true
@@ -171,13 +191,9 @@ test('a TTY sees its queue position while waiting', async () => {
     await Promise.all([first, second])
   } finally {
     process.stderr.write = originalWrite
-    Object.defineProperty(process.stderr, 'isTTY', {
-      configurable: true,
-      value: originalIsTTY,
-    })
   }
 
-  assert.match(writes.join(''), /waiting behind 1 task\(s\) in progress/)
+  assert.match(writes.join(''), /place 2 of 2 in progress/)
 })
 
 test('an interrupt releases the queue row and returns a signal exit code', async () => {
