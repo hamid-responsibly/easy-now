@@ -1,0 +1,55 @@
+{
+  "name": "easy-now",
+  "version": "0.1.0",
+  "description": "Cross-process queue for npm scripts. Later callers wait instead of running at the same time.",
+  "author": "Hamid Tondkaranfar",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hamid-responsibly/easy-now.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hamid-responsibly/easy-now/issues"
+  },
+  "homepage": "https://github.com/hamid-responsibly/easy-now#readme",
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "bin": {
+    "easy-now": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "keywords": [
+    "queue",
+    "fifo",
+    "npm-scripts",
+    "cli",
+    "sqlite"
+  ],
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
