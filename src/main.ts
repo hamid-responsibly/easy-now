@@ -212,5 +212,8 @@ easy-now flags must come before a command argument. Use -- before literal
 command flags:
 
   easy-now -t 30 run test -- -t 5
+
+pnpm adds its own --, so easy-now drops one -- right after the command:
+easy-now -- jest -- --watch runs jest --watch. Pass -- -- to keep one.
 `)
 }

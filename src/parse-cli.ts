@@ -158,11 +158,10 @@ function parseVerb(verb: Verb, rest: string[], flags: InternalFlags): ParsedCli 
       if (!script) {
         throw new Error('Usage: easy-now run <script> [...args]')
       }
-      const scriptArgs = rest.slice(1)
       return {
         kind: 'run',
         script,
-        scriptArgs: scriptArgs[0] === '--' ? scriptArgs.slice(1) : scriptArgs,
+        scriptArgs: stripSingleSeparator(rest.slice(1)),
         ...options,
       }
     }
@@ -180,9 +179,24 @@ function parseExec(argv: string[], flags: InternalFlags): ParsedCli {
     return meta
   }
   const options = commandOptions(flags)
-  return argv.length === 0
-    ? { kind: 'help' }
-    : { kind: 'exec', argv, ...options }
+  if (argv.length === 0) {
+    return { kind: 'help' }
+  }
+  // pnpm appends user args with its own `--` separator, so
+  // `pnpm test -- --watch` reaches us as `easy-now -- jest -- --watch`.
+  // Strip one `--` right after the command, the same way `run` strips one
+  // after the script name. A command that needs a literal leading `--`
+  // (e.g. `grep -- -pattern`) can pass `-- --` to keep one.
+  const [command, ...afterCommand] = argv
+  return {
+    kind: 'exec',
+    argv: [command as string, ...stripSingleSeparator(afterCommand)],
+    ...options,
+  }
+}
+
+function stripSingleSeparator(args: string[]): string[] {
+  return args[0] === '--' ? args.slice(1) : args
 }
 
 function parseMeta(flags: InternalFlags): ParsedCli | null {
