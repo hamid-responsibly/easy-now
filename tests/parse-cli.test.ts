@@ -216,3 +216,25 @@ test('all cannot be combined with a named queue', () => {
 test('missing run script throws', () => {
   assert.throws(() => parseCli(['run']), /Usage: easy-now run/)
 })
+
+test('exec strips one pnpm-style separator after the command', () => {
+  assert.deepEqual(parseCli(['--', 'jest', '--', '--runTestsByPath', 'foo']), {
+    kind: 'exec',
+    argv: ['jest', '--runTestsByPath', 'foo'],
+  })
+  assert.deepEqual(parseCli(['jest', '--', '--runTestsByPath', 'foo']), {
+    kind: 'exec',
+    argv: ['jest', '--runTestsByPath', 'foo'],
+  })
+})
+
+test('exec keeps a second separator for commands that need a literal --', () => {
+  assert.deepEqual(parseCli(['--', 'jest', '--', '--', '--foo']), {
+    kind: 'exec',
+    argv: ['jest', '--', '--foo'],
+  })
+  assert.deepEqual(parseCli(['--', 'npm', 'run', 'test', '--', '--watch']), {
+    kind: 'exec',
+    argv: ['npm', 'run', 'test', '--', '--watch'],
+  })
+})
