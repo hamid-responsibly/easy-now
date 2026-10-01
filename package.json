@@ -1,6 +1,6 @@
 {
   "name": "easy-now",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Cross-process queue for npm scripts. Later callers wait instead of running at the same time.",
   "author": "Hamid Tondkaranfar",
   "type": "module",
